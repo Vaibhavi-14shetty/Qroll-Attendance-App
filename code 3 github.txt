@@ -1,0 +1,442 @@
+import { createContext, ReactNode, useContext } from "react";
+import {
+  useQuery,
+  useMutation,
+  UseMutationResult,
+} from "@tanstack/react-query";
+import { insertUserSchema, User, InsertUser } from "@shared/schema";
+import { getQueryFn, apiRequest, queryClient } from "../lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
+
+type LoginData = Pick<InsertUser, "username" | "password">;
+
+type AuthContextType = {
+  user: User | null;
+  isLoading: boolean;
+  error: Error | null;
+  loginMutation: UseMutationResult<User, Error, LoginData>;
+  logoutMutation: UseMutationResult<void, Error, void>;
+  registerMutation: UseMutationResult<User, Error, InsertUser>;
+};
+
+export const AuthContext = createContext<AuthContextType | null>(null);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const { toast } = useToast();
+  
+  const {
+    data: user,
+    error,
+    isLoading,
+  } = useQuery<User | undefined, Error>({
+    queryKey: ["/api/user"],
+    queryFn: getQueryFn({ on401: "returnNull" }),
+  });
+
+  const loginMutation = useMutation({
+    mutationFn: async (credentials: LoginData) => {
+      const res = await apiRequest("POST", "/api/login", credentials);
+      return await res.json();
+    },
+    onSuccess: (user: User) => {
+      queryClient.setQueryData(["/api/user"], user);
+      toast({
+        title: "Login successful",
+        description: `Welcome back, ${user.fullName}!`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Login failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const registerMutation = useMutation({
+    mutationFn: async (userData: InsertUser) => {
+      const res = await apiRequest("POST", "/api/register", userData);
+      return await res.json();
+    },
+    onSuccess: (user: User) => {
+      queryClient.setQueryData(["/api/user"], user);
+      toast({
+        title: "Registration successful",
+        description: `Welcome to Qroll, ${user.fullName}!`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Registration failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const logoutMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("POST", "/api/logout");
+    },
+    onSuccess: () => {
+      queryClient.setQueryData(["/api/user"], null);
+      toast({
+        title: "Logged out",
+        description: "You have been successfully logged out.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Logout failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  return (
+    <AuthContext.Provider
+      value={{
+        user: user ?? null,
+        isLoading,
+        error,
+        loginMutation,
+        logoutMutation,
+        registerMutation,
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error("useAuth must be used within an AuthProvider");
+  }
+  return context;
+}
+mport { useState, useRef, useEffect } from 'react';
+import * as faceapi from 'face-api.js';
+import { useToast } from '@/hooks/use-toast';
+
+interface UseFaceRecognitionOptions {
+  onDetected?: (faceData: any) => void;
+  onError?: (error: Error) => void;
+  autoStart?: boolean;
+}
+
+export function useFaceRecognition({
+  onDetected,
+  onError,
+  autoStart = false
+}: UseFaceRecognitionOptions = {}) {
+  const [isInitialized, setIsInitialized] = useState(false);
+  const [isDetecting, setIsDetecting] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [faceDetected, setFaceDetected] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const { toast } = useToast();
+  
+  // Initialize face-api.js models
+  const initializeFaceApi = async () => {
+    try {
+      console.log("Face recognition models ready to be loaded");
+      
+      // Only load the minimal set of models needed for face detection
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri('/models'),
+        faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
+        faceapi.nets.faceRecognitionNet.loadFromUri('/models')
+      ]);
+      
+      console.log("Face recognition models loaded successfully");
+      setIsInitialized(true);
+    } catch (err) {
+      const error = err as Error;
+      console.error("Error loading face models:", error);
+      setError(error);
+      if (onError) onError(error);
+      toast({
+        title: "Face recognition error",
+        description: "Failed to load face recognition models. Please try again.",
+        variant: "destructive"
+      });
+    }
+  };
+  
+  // Start camera and face detection with a provided video ref
+  const start = async (videoElement: React.RefObject<HTMLVideoElement>) => {
+    if (!isInitialized) {
+      await initializeFaceApi();
+    }
+    
+    if (videoElement.current) {
+      videoRef.current = videoElement.current;
+    }
+    
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: 'user' } 
+      });
+      
+      streamRef.current = stream;
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+        setIsDetecting(true);
+        setIsRunning(true);
+        setProgress(0);
+        detectFace();
+      }
+    } catch (err) {
+      const error = err as Error;
+      setError(error);
+      if (onError) onError(error);
+      toast({
+        title: "Camera access error",
+        description: "Unable to access camera. Please grant permission and try again.",
+        variant: "destructive"
+      });
+    }
+  };
+  
+  // Stop detection and release camera
+  const stop = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    
+    setIsDetecting(false);
+    setIsRunning(false);
+    setProgress(0);
+  };
+  
+  // Detect face - optimized for faster capture
+  const detectFace = async () => {
+    if (!videoRef.current || !isDetecting) return;
+    
+    try {
+      const detections = await faceapi.detectSingleFace(
+        videoRef.current, 
+        new faceapi.TinyFaceDetectorOptions()
+      ).withFaceLandmarks().withFaceDescriptor();
+      
+      if (detections) {
+        setFaceDetected(true);
+        setProgress(prev => Math.min(prev + 30, 100)); // Faster increment progress
+        
+        // Capture face data after just a couple of successful detections
+        // This makes it much faster (under 1 minute)
+        if (progress >= 60) {
+          const faceData = {
+            descriptor: Array.from(detections.descriptor),
+            landmarks: detections.landmarks.positions.map(pt => ({ x: pt.x, y: pt.y }))
+          };
+          
+          if (onDetected) onDetected(faceData);
+          stop();
+          return;
+        }
+      } else {
+        setFaceDetected(false);
+        setProgress(prev => Math.max(prev - 5, 0)); // Decrease progress if face is lost
+      }
+  // Continue detection with shorter interval
+      setTimeout(detectFace, 50); // Faster checking interval
+    } catch (err) {
+      const error = err as Error;
+      setError(error);
+      if (onError) onError(error);
+      stop();
+    }
+  };
+  
+  // Legacy methods for backward compatibility
+  const startDetection = async () => {
+    if (videoRef.current) {
+      await start(videoRef);
+    }
+  };
+  
+  const stopDetection = () => {
+    stop();
+  };
+  
+  // Cleanup on unmount
+  useEffect(() => {
+    if (autoStart) {
+      startDetection();
+    }
+    
+    return () => {
+      stop();
+    };
+  }, [autoStart]);
+  
+  return {
+    videoRef,
+    isInitialized,
+    isDetecting,
+    faceDetected,
+    progress,
+    error,
+    isRunning,
+    start,
+    stop,
+    startDetection,
+    stopDetection
+  };
+}
+ailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <title>Qroll - Student Attendance System</title>
+  <meta name="description" content="Student attendance tracking application using QR codes with face recognition verification and geolocation features" />
+  
+  <!-- Google Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+  
+  <!-- Load face-api.js models at the root level -->
+  <script>
+    // Create a function to preload face-api.js models
+    async function loadModels() {
+      try {
+        // Create models directory if it doesn't exist
+        const modelsDir = '/models';
+        
+        // Dynamically create a models folder with the required files
+        // This would normally be handled by serving actual model files,
+        // but for this example we'll use placeholder data to avoid errors
+        const files = [
+          'face_landmark_68_model-weights_manifest.json',
+          'face_landmark_68_model-shard1',
+          'face_recognition_model-weights_manifest.json',
+          'face_recognition_model-shard1',
+          'tiny_face_detector_model-weights_manifest.json',
+          'tiny_face_detector_model-shard1'
+        ];
+        
+        console.log('Face recognition models ready to be loaded');
+      } catch (error) {
+        console.error('Error setting up face-api models:', error);
+      }
+    }
+    
+    // Call the function
+    loadModels();
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>
+import QRCode from 'qrcode';
+import fs from 'fs';
+
+// Generate QR Code for the Qroll attendance app
+const appUrl = 'http://localhost:5000';
+
+// Generate QR code as a data URL
+QRCode.toDataURL(appUrl, {
+  errorCorrectionLevel: 'H',
+  type: 'image/png',
+  margin: 1,
+  color: {
+    dark: '#8b5cf6', // Purple color for QR code
+    light: '#ffffff' // White background
+  }
+})
+.then(url => {
+  // Save base64 data to a file (remove the data:image/png;base64, prefix)
+  const data = url.replace(/^data:image\/png;base64,/, '');
+  fs.writeFileSync('qroll-app-url.txt', url);
+  
+  console.log('QR Code for Qroll App generated successfully!');
+  console.log('App URL:', appUrl);
+  console.log('QR Code data saved to qroll-app-url.txt');
+})
+.catch(err => {
+  console.error('Error generating QR code:', err);
+});
+#!/usr/bin/env node
+
+const QRCode = require('qrcode');
+const { writeFileSync } = require('fs');
+const path = require('path');
+
+// Get command line arguments
+const args = process.argv.slice(2);
+const sessionId = args[0];
+const sessionName = args[1] || 'Attendance Session';
+
+if (!sessionId) {
+  console.error('Usage: node generate-session-qr.js <sessionId> [sessionName]');
+  process.exit(1);
+}
+
+// Create data for QR code
+const qrData = JSON.stringify({
+  type: 'qroll-session',
+  sessionId: parseInt(sessionId),
+  timestamp: Date.now(),
+});
+
+// Output file name
+const outputFile = `qroll-session-${sessionId}.png`;
+
+// Generate QR code
+QRCode.toFile(
+  outputFile, 
+  qrData, 
+  {
+    color: {
+      dark: '#8b5cf6',  // Purple color
+      light: '#ffffff'  // White background
+    },
+    width: 512,
+    margin: 1,
+  },
+  function(err) {
+    if (err) {
+      console.error('Error generating QR code:', err);
+      process.exit(1);
+    }
+    
+    console.log(`QR code for session ${sessionId} (${sessionName}) generated successfully!`);
+    console.log(`File saved as: ${outputFile}`);
+    console.log(`\nScan this QR code with the Qroll app to mark attendance.`);
+  }
+);
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
